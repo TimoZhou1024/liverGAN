@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liqa-mrgan3d"
+version = "0.1.0"
+description = "2.5D/3D MRI translation baseline inspired by MrGAN for LiQA NIfTI data."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+authors = [{ name = "LiQA MrGAN3D contributors" }]
+dependencies = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "numpy>=1.24",
+    "nibabel>=5.2",
+    "SimpleITK>=2.3",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+    "opencv-python>=4.8",
+    "pyyaml>=6.0",
+    "easydict>=1.11",
+    "tqdm>=4.66",
+    "tensorboard>=2.14",
+    "lpips>=0.1.4",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
