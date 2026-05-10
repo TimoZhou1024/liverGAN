@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from liqa_mrgan3d.trainer.liqa_3d_trainer import LiQA3DTrainer
 from liqa_mrgan3d.trainer.liqa_trainer import LiQATrainer
 from liqa_mrgan3d.utils.config import load_config
 
@@ -12,7 +13,10 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    trainer = LiQATrainer(config)
+    if config.get("mode") == "3d_patch":
+        trainer = LiQA3DTrainer(config)
+    else:
+        trainer = LiQATrainer(config)
     trainer.train()
 
 
