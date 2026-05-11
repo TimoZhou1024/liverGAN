@@ -253,7 +253,9 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
     """Patch-based native 3D LiQA dataset.
 
     Each item returns source modalities as a 3D patch `A` with shape [C, D, H, W]
-    and the target GED4 patch `B` with shape [1, D, H, W].
+    and the target GED4 patch `B` with shape [1, D, H, W]. If ``mask_root`` is
+    configured, the matching liver mask is loaded, resampled to GED4 voxel space,
+    and returned as `M` with the same spatial shape (binary float values).
     """
 
     def __init__(self, config: dict[str, Any], split: str = "train") -> None:
@@ -266,6 +268,13 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
         self.normalize_to_tanh = bool(config.get("normalize_to_tanh", True))
         self.resample_to_target = bool(config.get("resample_to_target", True))
         self.max_patches_per_volume = config.get("max_patches_per_volume")
+        self.mask_root: Path | None = (
+            Path(config["mask_root"]) if config.get("mask_root") else None
+        )
+        self.dataset_root: Path | None = (
+            Path(config["dataset_root"]) if config.get("dataset_root") else None
+        )
+        self.mask_suffix: str = str(config.get("mask_suffix", "GED4_pred.nii.gz"))
 
         list_key = f"{split}_txt_path"
         if list_key not in config:
@@ -286,6 +295,22 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
         if starts[-1] != last:
             starts.append(last)
         return starts
+
+    def _mask_path_for(self, sample_dir: Path) -> Path:
+        """Resolve the GED4 mask path that mirrors ``sample_dir``.
+
+        If ``dataset_root`` is configured, the mask path is
+        ``mask_root / sample_dir.relative_to(dataset_root) / mask_suffix`` (works
+        symmetrically for ``LiQA_train\\Vendor_*\\<case>`` and
+        ``LiQA_val\\Data\\Vendor_*\\<case>``). Otherwise we fall back to
+        ``mask_root / vendor / case / mask_suffix`` for backward compatibility.
+        """
+        assert self.mask_root is not None
+        sample_dir = Path(sample_dir)
+        if self.dataset_root is not None:
+            rel = sample_dir.resolve().relative_to(Path(self.dataset_root).resolve())
+            return self.mask_root / rel / self.mask_suffix
+        return self.mask_root / sample_dir.parent.name / sample_dir.name / self.mask_suffix
 
     def _build_index(self) -> None:
         patch_d, patch_h, patch_w = self.patch_size
@@ -372,6 +397,22 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
                 volume = to_minus_one_to_one(volume)
             volumes[modality] = volume
 
+        if self.mask_root is not None:
+            mask_path = self._mask_path_for(sample_dir)
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Missing mask file: {mask_path}")
+            mask_volume, mask_affine, _ = load_nifti(mask_path)
+            if mask_volume.shape != reference_shape:
+                mask_volume = resample_like(
+                    moving=mask_volume,
+                    moving_affine=mask_affine,
+                    reference_shape=reference_shape,
+                    reference_affine=affine,
+                    order=0,
+                )
+            mask_volume = (mask_volume > 0.5).astype(np.float32)
+            volumes["_mask"] = mask_volume
+
         meta = VolumeMeta(
             sample_id=sample_dir.name,
             affine=affine,
@@ -408,10 +449,20 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
             source = resize_volume_tensor(source, expected_size)
             target = resize_volume_tensor(target, expected_size)
 
-        return {
+        item: dict[str, Any] = {
             "A": source,
             "B": target,
             "sample_id": meta.sample_id,
             "patch_origin": torch.tensor([z0, y0, x0], dtype=torch.long),
             "sample_dir": str(sample_dir),
         }
+
+        if "_mask" in volumes:
+            mask_patch = volumes["_mask"][y0:y1, x0:x1, z0:z1]
+            mask = torch.from_numpy(mask_patch[None, ...]).float().permute(0, 3, 1, 2)
+            if tuple(mask.shape[1:]) != expected_size:
+                # Use nearest-equivalent: trilinear then threshold.
+                mask = (resize_volume_tensor(mask, expected_size) > 0.5).float()
+            item["M"] = mask
+
+        return item

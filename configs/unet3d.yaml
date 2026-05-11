@@ -1,0 +1,31 @@
+name: liqa_unet3d
+save_root: outputs/unet3d
+chk_path: chk/UNet3D.pth
+
+# Data
+input_modalities: [T1, T2, DWI_800]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+patch_size: [16, 128, 128]
+patch_stride: [8, 64, 64]
+normalize_to_tanh: true
+resample_to_target: true
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+num_classes: 2
+palette: [[0], [1]]
+unet_depth: 1
+unet_base_channels: 32
+
+# Training
+cuda: true
+n_epochs: 30
+batch_size: 1
+n_cpu: 0
+lr: 0.0001

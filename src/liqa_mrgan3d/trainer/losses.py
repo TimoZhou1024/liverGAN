@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -57,6 +58,104 @@ class GaussianBlur3D(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.conv3d(x, self.kernel, padding=self.padding, groups=self.groups)
+
+
+class SmoothnessLoss3D(nn.Module):
+    """Squared first-order finite-difference penalty on a 3D displacement field.
+
+    Mirrors ``smooothing_loss`` from reference/MrGAN/trainer/utils.py:167, generalised
+    from (B, C, H, W) to (B, C, D, H, W).
+    """
+
+    def forward(self, flow: torch.Tensor) -> torch.Tensor:
+        dz = flow[:, :, 1:, :, :] - flow[:, :, :-1, :, :]
+        dy = flow[:, :, :, 1:, :] - flow[:, :, :, :-1, :]
+        dx = flow[:, :, :, :, 1:] - flow[:, :, :, :, :-1]
+        return (dz * dz).mean() + (dy * dy).mean() + (dx * dx).mean()
+
+
+class LPIPS2DSliceWise(nn.Module):
+    """LPIPS computed slice-wise along the depth axis of a 3D volume.
+
+    LPIPS (lpips package, VGG backbone) is a 2D-only perceptual metric. To use it on
+    3D volumes we evaluate it on every axial slice ``[B, 1, H, W]``, replicate the
+    single grayscale channel to 3 channels, clip to [-1, 1], and average across
+    slices. Inputs are expected in tanh range (~[-1, 1]).
+    """
+
+    def __init__(self, net: str = "vgg") -> None:
+        super().__init__()
+        import lpips  # local import - heavy
+
+        self.model = lpips.LPIPS(net=net)
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # pred / target: [B, 1, D, H, W]
+        if pred.dim() != 5 or target.dim() != 5:
+            raise ValueError(f"Expected 5D inputs, got {pred.shape} and {target.shape}")
+        b, c, d, h, w = pred.shape
+        pred_2d = pred.permute(0, 2, 1, 3, 4).reshape(b * d, c, h, w)
+        target_2d = target.permute(0, 2, 1, 3, 4).reshape(b * d, c, h, w)
+        if c == 1:
+            pred_2d = pred_2d.repeat(1, 3, 1, 1)
+            target_2d = target_2d.repeat(1, 3, 1, 1)
+        pred_2d = pred_2d.clamp(-1.0, 1.0)
+        target_2d = target_2d.clamp(-1.0, 1.0)
+        distances = self.model.forward(pred_2d, target_2d)
+        return distances.mean()
+
+
+class SoftDice3D(nn.Module):
+    """SoftDice loss over foreground classes for 3D one-hot inputs.
+
+    Mirrors ``SoftDiceLoss`` from reference/MrGAN/trainer/utils.py:311. Skips
+    background channel (index 0), averages Dice over remaining classes, returns
+    ``1 - mean_dice``.
+    """
+
+    def __init__(self, num_classes: int) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+
+    @staticmethod
+    def _dice_coef(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+        n = target.size(0)
+        pred_flat = pred.reshape(n, -1)
+        target_flat = target.reshape(n, -1)
+        tp = (pred_flat * target_flat).sum(dim=1)
+        fp = pred_flat.sum(dim=1) - tp
+        fn = target_flat.sum(dim=1) - tp
+        score = (2 * tp + eps) / (2 * tp + fp + fn + eps)
+        return score.sum() / n
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        class_dice = []
+        for i in range(1, self.num_classes):
+            class_dice.append(self._dice_coef(y_pred[:, i : i + 1], y_true[:, i : i + 1]))
+        mean_dice = sum(class_dice) / len(class_dice)
+        return 1 - mean_dice
+
+
+def mask_to_onehot_3d(mask: torch.Tensor, palette: list[list[int]]) -> torch.Tensor:
+    """Convert a class-id mask to a one-hot tensor.
+
+    ``mask`` has shape ``[B, 1, D, H, W]`` (or ``[1, D, H, W]``) with integer class
+    ids. ``palette`` is a list of single-element class ids, e.g. ``[[0], [1]]``.
+    Returns a float tensor of shape ``[B, len(palette), D, H, W]``.
+    """
+    mask_np = mask.detach().cpu().numpy()
+    if mask_np.ndim == 4:
+        mask_np = mask_np[np.newaxis, ...]
+    if mask_np.ndim != 5 or mask_np.shape[1] != 1:
+        raise ValueError(f"mask must have shape [B, 1, D, H, W], got {mask_np.shape}")
+    semantic = []
+    for colour in palette:
+        equality = np.equal(mask_np, colour[0])
+        semantic.append(equality[:, 0])  # drop the singleton channel dim
+    semantic = np.stack(semantic, axis=1).astype(np.float32)
+    return torch.from_numpy(semantic)
 
 
 def psnr_from_mse(mse: float, data_range: float = 2.0) -> float:
