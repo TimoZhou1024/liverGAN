@@ -47,10 +47,11 @@ from liqa_mrgan3d.models.mrgan3d import (
     MrGANGenerator3D,
     mrgan_weights_init_normal,
 )
-from liqa_mrgan3d.models.reg3d import Reg3D
+from liqa_mrgan3d.models.reg3d import ConvAct3D, Reg3D
 from liqa_mrgan3d.models.transformer3d import Transformer3D
 from liqa_mrgan3d.models.unet3d import EncoderBlock3D, UNet3D
 from liqa_mrgan3d.trainer.distributed import (
+    apply_activation_checkpoint,
     fsdp_wrap,
     gather_full_state_dict,
     init_distributed,
@@ -183,17 +184,30 @@ class LiQA3DTrainer:
                     min_params=5_000_000,
                     sharding=ShardingStrategy.SHARD_GRAD_OP,
                     checkpoint=self.use_activation_checkpoint,
+                    checkpoint_target_cls=(ConvAct3D,),
                     use_amp=self.use_amp,
                 )
             if self.unet is not None:
                 # Frozen → NO_SHARD keeps params local and avoids FSDP no_grad issues.
+                # Activation checkpoint on the big encoder blocks: the shape loss's
+                # gradient has to flow through UNet back to reg_b, so UNet activations
+                # are stored during backward even though its params are frozen.
                 self.unet = fsdp_wrap(
                     self.unet,
                     min_params=10_000_000,
                     sharding=ShardingStrategy.NO_SHARD,
-                    checkpoint=False,
+                    checkpoint=self.use_activation_checkpoint,
+                    checkpoint_target_cls=(EncoderBlock3D,),
                     use_amp=False,  # Keep UNet in fp32 — it's a thin inference pass.
                 )
+        elif self.use_activation_checkpoint:
+            # Single-GPU path: still apply activation checkpointing so the [32, 384, 384]
+            # volume fits on one card. Same target modules as the FSDP branch above.
+            apply_activation_checkpoint(self.net_g, (ConvBlock3D,))
+            if self.reg is not None:
+                apply_activation_checkpoint(self.reg, (ConvAct3D,))
+            if self.unet is not None:
+                apply_activation_checkpoint(self.unet, (EncoderBlock3D,))
 
         # --- Losses ---
         self.gan_loss = GANLoss().to(self.device)
@@ -203,7 +217,13 @@ class LiQA3DTrainer:
         self.soft_dice = SoftDice3D(self.num_classes).to(self.device)
         self.lpips: LPIPS2DSliceWise | None = None
         if float(config.get("perceptual_lambda", 0.0)) > 0:
-            self.lpips = LPIPS2DSliceWise(net="vgg").to(self.device)
+            # `lpips_slices` subsamples k slices per call to cap VGG activation memory.
+            # Falls back to all slices when unset.
+            lpips_slices = config.get("lpips_slices")
+            self.lpips = LPIPS2DSliceWise(
+                net="vgg",
+                num_slices=int(lpips_slices) if lpips_slices else None,
+            ).to(self.device)
 
         # --- Optimisers ---
         lr = float(config.get("lr", 1e-4))
@@ -393,10 +413,12 @@ class LiQA3DTrainer:
                 loss_sr = torch.zeros((), device=self.device)
 
             if self.unet is not None and mask is not None:
-                with torch.no_grad() if isinstance(self.unet, nn.Module) and not any(
-                    p.requires_grad for p in self.unet.parameters()
-                ) else _nullcontext():
-                    regist_seg = torch.sigmoid(self.unet(reg_b))
+                # UNet params are frozen (requires_grad=False), so no grads flow into
+                # UNet weights. But reg_b DOES require grad → UNet's forward still
+                # has to record activations so its backward can propagate dL/dreg_b.
+                # Activation checkpointing on the UNet's EncoderBlock3D's (wired in
+                # __init__) is what keeps this tractable for [32, 384, 384] inputs.
+                regist_seg = torch.sigmoid(self.unet(reg_b))
                 real_seg_onehot = mask_to_onehot_3d(mask.long(), self.palette)
                 loss_shape = self.soft_dice(regist_seg, real_seg_onehot) * shape_lambda
             else:

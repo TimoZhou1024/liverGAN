@@ -46,6 +46,12 @@ corr_lambda: 1.0
 smooth_lambda: 1.0
 shape_lambda: 1.0
 
+# LPIPS: subsample k slices per forward to cap VGG activation memory. At D=32
+# the unsubsampled path effectively runs batch=32 through VGG16 (10+ GB of
+# activations per call). k=4 drops that to batch=4 for ~8× memory savings with
+# only mild variance increase in the per-step perceptual estimate.
+lpips_slices: 4
+
 # Training
 cuda: true
 epoch: 0

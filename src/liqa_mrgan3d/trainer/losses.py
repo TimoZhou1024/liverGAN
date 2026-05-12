@@ -77,25 +77,40 @@ class SmoothnessLoss3D(nn.Module):
 class LPIPS2DSliceWise(nn.Module):
     """LPIPS computed slice-wise along the depth axis of a 3D volume.
 
-    LPIPS (lpips package, VGG backbone) is a 2D-only perceptual metric. To use it on
-    3D volumes we evaluate it on every axial slice ``[B, 1, H, W]``, replicate the
-    single grayscale channel to 3 channels, clip to [-1, 1], and average across
-    slices. Inputs are expected in tanh range (~[-1, 1]).
+    LPIPS (lpips package, VGG backbone) is a 2D-only perceptual metric. To use
+    it on 3D volumes we evaluate it on every axial slice ``[B, 1, H, W]``,
+    replicate the single grayscale channel to 3 channels, clip to [-1, 1], and
+    average across slices. Inputs are expected in tanh range (~[-1, 1]).
+
+    At ``D=32`` a single call effectively runs a ``batch=32`` VGG16 forward per
+    LPIPS invocation, which dominates activation memory on large volumes. Set
+    ``num_slices`` to randomly subsample ``k`` slices per call (stochastic
+    Monte Carlo estimator of the per-slice mean) — this cuts VGG memory by
+    ``D / k``.
     """
 
-    def __init__(self, net: str = "vgg") -> None:
+    def __init__(self, net: str = "vgg", num_slices: int | None = None) -> None:
         super().__init__()
         import lpips  # local import - heavy
 
         self.model = lpips.LPIPS(net=net)
         for p in self.model.parameters():
             p.requires_grad = False
+        self.num_slices = num_slices
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # pred / target: [B, 1, D, H, W]
         if pred.dim() != 5 or target.dim() != 5:
             raise ValueError(f"Expected 5D inputs, got {pred.shape} and {target.shape}")
         b, c, d, h, w = pred.shape
+
+        if self.num_slices is not None and 0 < self.num_slices < d:
+            # Random subset of slices; sort indices so downstream reshape is deterministic.
+            idx = torch.randperm(d, device=pred.device)[: self.num_slices].sort().values
+            pred = pred.index_select(2, idx)
+            target = target.index_select(2, idx)
+            d = self.num_slices
+
         pred_2d = pred.permute(0, 2, 1, 3, 4).reshape(b * d, c, h, w)
         target_2d = target.permute(0, 2, 1, 3, 4).reshape(b * d, c, h, w)
         if c == 1:

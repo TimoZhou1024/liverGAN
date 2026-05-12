@@ -61,6 +61,31 @@ def _mixed_precision_policy(use_amp: bool) -> MixedPrecision | None:
     )
 
 
+def apply_activation_checkpoint(
+    model: nn.Module,
+    checkpoint_target_cls: tuple[type, ...],
+) -> nn.Module:
+    """Apply activation checkpointing in-place, *without* FSDP.
+
+    For single-GPU runs (``is_dist=False``) the trainer skips ``fsdp_wrap`` so
+    the checkpoint flag would be a no-op. Call this instead to get the same
+    memory savings on one card.
+    """
+    if not checkpoint_target_cls:
+        return model
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        apply_activation_checkpointing,
+        checkpoint_wrapper,
+    )
+
+    apply_activation_checkpointing(
+        model,
+        checkpoint_wrapper_fn=checkpoint_wrapper,
+        check_fn=lambda submodule: isinstance(submodule, checkpoint_target_cls),
+    )
+    return model
+
+
 def fsdp_wrap(
     model: nn.Module,
     *,

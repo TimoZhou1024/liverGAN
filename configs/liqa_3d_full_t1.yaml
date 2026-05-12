@@ -44,6 +44,9 @@ corr_lambda: 1.0
 smooth_lambda: 1.0
 shape_lambda: 1.0
 
+# Subsample LPIPS slices; see comment in configs/liqa_3d_full.yaml.
+lpips_slices: 4
+
 # Training
 cuda: true
 epoch: 0
