@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from liqa_mrgan3d.data.datasets_liqa import LiQA3DPatchDataset, load_nifti
-from liqa_mrgan3d.models.pix2pix_3d import Generator3D
+from liqa_mrgan3d.models.mrgan3d import MrGANGenerator3D
 from liqa_mrgan3d.utils.config import ensure_dir, load_config
 
 
@@ -32,10 +32,11 @@ def main() -> None:
     dataset = LiQA3DPatchDataset(config, split="test")
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
-    model = Generator3D(
-        input_nc=int(config.get("input_nc", len(config.get("input_modalities", [])))),
-        output_nc=int(config.get("output_nc", 1)),
-        base_channels=int(config.get("g_base_channels", 16)),
+    model = MrGANGenerator3D(
+        in_c=int(config.get("input_nc", len(config.get("input_modalities", [])))),
+        mid_c=int(config.get("g_base_channels", 32)),
+        layers=int(config.get("g_layers", 2)),
+        s_layers=int(config.get("g_share_layers", 3)),
     ).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint.get("net_g", checkpoint))
