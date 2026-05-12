@@ -100,6 +100,128 @@ def _read_list(path: str | Path) -> list[Path]:
         return [Path(line.strip()) for line in f if line.strip()]
 
 
+def _resolve_mask_path(
+    sample_dir: Path,
+    *,
+    mask_root: Path,
+    dataset_root: Path | None,
+    mask_suffix: str,
+) -> Path:
+    """Resolve the GED4 mask path that mirrors ``sample_dir``.
+
+    If ``dataset_root`` is configured, the mask path is
+    ``mask_root / sample_dir.relative_to(dataset_root) / mask_suffix`` (works
+    symmetrically for ``LiQA_train\\Vendor_*\\<case>`` and
+    ``LiQA_val\\Data\\Vendor_*\\<case>``). Otherwise we fall back to
+    ``mask_root / vendor / case / mask_suffix`` for backward compatibility.
+    """
+    sample_dir = Path(sample_dir)
+    if dataset_root is not None:
+        rel = sample_dir.resolve().relative_to(Path(dataset_root).resolve())
+        return mask_root / rel / mask_suffix
+    return mask_root / sample_dir.parent.name / sample_dir.name / mask_suffix
+
+
+def load_case_volumes(
+    config: dict[str, Any],
+    sample_dir: Path,
+    *,
+    modalities: list[str],
+    target_modality: str,
+) -> tuple[dict[str, np.ndarray], VolumeMeta]:
+    """Load, resample, normalise all modalities for one case, plus optional mask.
+
+    Returns ``(volumes_dict, meta)`` where ``volumes_dict`` keys are the
+    modality names (and ``"_mask"`` when a mask is configured). Modalities are
+    resampled to the target modality's voxel grid, percentile-normalised, and
+    (if ``normalize_to_tanh`` is set) rescaled to ``[-1, 1]``.
+
+    Extracted from the original ``LiQA3DPatchDataset._load_sample`` so the
+    patch and full-volume datasets share a single preprocessing path and stay
+    numerically in lock-step.
+    """
+    sample_dir = Path(sample_dir)
+    mask_root = Path(config["mask_root"]) if config.get("mask_root") else None
+    dataset_root = Path(config["dataset_root"]) if config.get("dataset_root") else None
+    mask_suffix = str(config.get("mask_suffix", "GED4_pred.nii.gz"))
+    normalize_to_tanh = bool(config.get("normalize_to_tanh", True))
+    resample_to_target = bool(config.get("resample_to_target", True))
+    percentile_lower = float(config.get("percentile_lower", 1.0))
+    percentile_upper = float(config.get("percentile_upper", 99.0))
+
+    all_modalities = [*modalities, target_modality]
+    volumes: dict[str, np.ndarray] = {}
+    affines: dict[str, np.ndarray] = {}
+    affine: np.ndarray | None = None
+    header: nib.Nifti1Header | None = None
+    reference_shape: tuple[int, int, int] | None = None
+
+    for modality in all_modalities:
+        path = sample_dir / f"{modality}.nii.gz"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing modality {modality}: {path}")
+        volume, modality_affine, modality_header = load_nifti(path)
+        volumes[modality] = volume
+        affines[modality] = modality_affine
+
+        if modality == target_modality:
+            affine = modality_affine
+            header = modality_header
+            reference_shape = volume.shape
+
+    assert affine is not None and header is not None and reference_shape is not None
+    for modality, volume in volumes.items():
+        if volume.shape != reference_shape:
+            if not resample_to_target:
+                raise ValueError(
+                    f"Shape mismatch in {sample_dir}: {modality}={volume.shape}, "
+                    f"{target_modality}={reference_shape}. Run preprocessing/registration first "
+                    "or set resample_to_target=true."
+                )
+            volumes[modality] = resample_like(
+                moving=volume,
+                moving_affine=affines[modality],
+                reference_shape=reference_shape,
+                reference_affine=affine,
+                order=1,
+            )
+
+    for modality, volume in list(volumes.items()):
+        volume = percentile_normalize(volume, lower=percentile_lower, upper=percentile_upper)
+        if normalize_to_tanh:
+            volume = to_minus_one_to_one(volume)
+        volumes[modality] = volume
+
+    if mask_root is not None:
+        mask_path = _resolve_mask_path(
+            sample_dir,
+            mask_root=mask_root,
+            dataset_root=dataset_root,
+            mask_suffix=mask_suffix,
+        )
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Missing mask file: {mask_path}")
+        mask_volume, mask_affine, _ = load_nifti(mask_path)
+        if mask_volume.shape != reference_shape:
+            mask_volume = resample_like(
+                moving=mask_volume,
+                moving_affine=mask_affine,
+                reference_shape=reference_shape,
+                reference_affine=affine,
+                order=0,
+            )
+        mask_volume = (mask_volume > 0.5).astype(np.float32)
+        volumes["_mask"] = mask_volume
+
+    meta = VolumeMeta(
+        sample_id=sample_dir.name,
+        affine=affine,
+        header=header,
+        shape=reference_shape,
+    )
+    return volumes, meta
+
+
 class LiQA25DDataset(Dataset[dict[str, Any]]):
     """2.5D LiQA dataset.
 
@@ -297,20 +419,13 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
         return starts
 
     def _mask_path_for(self, sample_dir: Path) -> Path:
-        """Resolve the GED4 mask path that mirrors ``sample_dir``.
-
-        If ``dataset_root`` is configured, the mask path is
-        ``mask_root / sample_dir.relative_to(dataset_root) / mask_suffix`` (works
-        symmetrically for ``LiQA_train\\Vendor_*\\<case>`` and
-        ``LiQA_val\\Data\\Vendor_*\\<case>``). Otherwise we fall back to
-        ``mask_root / vendor / case / mask_suffix`` for backward compatibility.
-        """
         assert self.mask_root is not None
-        sample_dir = Path(sample_dir)
-        if self.dataset_root is not None:
-            rel = sample_dir.resolve().relative_to(Path(self.dataset_root).resolve())
-            return self.mask_root / rel / self.mask_suffix
-        return self.mask_root / sample_dir.parent.name / sample_dir.name / self.mask_suffix
+        return _resolve_mask_path(
+            Path(sample_dir),
+            mask_root=self.mask_root,
+            dataset_root=self.dataset_root,
+            mask_suffix=self.mask_suffix,
+        )
 
     def _build_index(self) -> None:
         patch_d, patch_h, patch_w = self.patch_size
@@ -349,75 +464,11 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
         sample_dir = Path(sample_dir)
         if sample_dir in self._cache:
             return self._cache[sample_dir]
-
-        all_modalities = [*self.modalities, self.target_modality]
-        volumes: dict[str, np.ndarray] = {}
-        affines: dict[str, np.ndarray] = {}
-        affine: np.ndarray | None = None
-        header: nib.Nifti1Header | None = None
-        reference_shape: tuple[int, int, int] | None = None
-
-        for modality in all_modalities:
-            path = sample_dir / f"{modality}.nii.gz"
-            if not path.exists():
-                raise FileNotFoundError(f"Missing modality {modality}: {path}")
-            volume, modality_affine, modality_header = load_nifti(path)
-            volumes[modality] = volume
-            affines[modality] = modality_affine
-
-            if modality == self.target_modality:
-                affine = modality_affine
-                header = modality_header
-                reference_shape = volume.shape
-
-        assert affine is not None and header is not None and reference_shape is not None
-        for modality, volume in volumes.items():
-            if volume.shape != reference_shape:
-                if not self.resample_to_target:
-                    raise ValueError(
-                        f"Shape mismatch in {sample_dir}: {modality}={volume.shape}, "
-                        f"{self.target_modality}={reference_shape}. Run preprocessing/registration first "
-                        "or set resample_to_target=true."
-                    )
-                volumes[modality] = resample_like(
-                    moving=volume,
-                    moving_affine=affines[modality],
-                    reference_shape=reference_shape,
-                    reference_affine=affine,
-                    order=1,
-                )
-
-        for modality, volume in list(volumes.items()):
-            volume = percentile_normalize(
-                volume,
-                lower=float(self.config.get("percentile_lower", 1.0)),
-                upper=float(self.config.get("percentile_upper", 99.0)),
-            )
-            if self.normalize_to_tanh:
-                volume = to_minus_one_to_one(volume)
-            volumes[modality] = volume
-
-        if self.mask_root is not None:
-            mask_path = self._mask_path_for(sample_dir)
-            if not mask_path.exists():
-                raise FileNotFoundError(f"Missing mask file: {mask_path}")
-            mask_volume, mask_affine, _ = load_nifti(mask_path)
-            if mask_volume.shape != reference_shape:
-                mask_volume = resample_like(
-                    moving=mask_volume,
-                    moving_affine=mask_affine,
-                    reference_shape=reference_shape,
-                    reference_affine=affine,
-                    order=0,
-                )
-            mask_volume = (mask_volume > 0.5).astype(np.float32)
-            volumes["_mask"] = mask_volume
-
-        meta = VolumeMeta(
-            sample_id=sample_dir.name,
-            affine=affine,
-            header=header,
-            shape=reference_shape,
+        volumes, meta = load_case_volumes(
+            self.config,
+            sample_dir,
+            modalities=self.modalities,
+            target_modality=self.target_modality,
         )
         self._cache[sample_dir] = (volumes, meta)
         return volumes, meta
@@ -463,6 +514,86 @@ class LiQA3DPatchDataset(Dataset[dict[str, Any]]):
             if tuple(mask.shape[1:]) != expected_size:
                 # Use nearest-equivalent: trilinear then threshold.
                 mask = (resize_volume_tensor(mask, expected_size) > 0.5).float()
+            item["M"] = mask
+
+        return item
+
+
+class LiQA3DFullVolumeDataset(Dataset[dict[str, Any]]):
+    """Whole-volume native 3D LiQA dataset for FSDP full-volume training.
+
+    One item per case. Each case's modalities, target, and mask are resampled
+    to a single fixed ``volume_size`` (default ``[32, 384, 384]``) so the
+    DataLoader returns stackable tensors and FSDP can rely on a static graph.
+
+    ``MrGANGenerator3D`` halves the spatial dimensions 5 times (2 in
+    ``Encoder3D`` + 3 in ``ShareNet3D``), so all three dimensions of
+    ``volume_size`` MUST be divisible by 32. The default of ``[32, 384, 384]``
+    satisfies this and matches typical LiQA axial resolution fairly closely.
+
+    Shares preprocessing (percentile-norm + tanh + mask resampling) with
+    :class:`LiQA3DPatchDataset` via the module-level ``load_case_volumes``
+    helper so both modes stay numerically in lock-step.
+    """
+
+    def __init__(self, config: dict[str, Any], split: str = "train") -> None:
+        self.config = config
+        self.split = split
+        self.modalities: list[str] = list(
+            config.get("input_modalities", ["T1", "T2", "DWI_800"])
+        )
+        self.target_modality: str = str(config.get("target_modality", "GED4"))
+        self.volume_size = parse_3d_size(config.get("volume_size"), (32, 384, 384))
+        for axis, size in zip("DHW", self.volume_size):
+            if size % 32 != 0:
+                raise ValueError(
+                    f"volume_size[{axis}]={size} is not divisible by 32 — the generator "
+                    "halves each spatial dim 5 times (Encoder+ShareNet) and will error."
+                )
+
+        list_key = f"{split}_txt_path"
+        if list_key not in config:
+            raise KeyError(f"Missing config key: {list_key}")
+        self.sample_dirs = _read_list(config[list_key])
+        if not self.sample_dirs:
+            raise ValueError(f"No samples found in {config[list_key]}")
+
+    def __len__(self) -> int:
+        return len(self.sample_dirs)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample_dir = self.sample_dirs[idx]
+        volumes, meta = load_case_volumes(
+            self.config,
+            sample_dir,
+            modalities=self.modalities,
+            target_modality=self.target_modality,
+        )
+
+        # Stack modalities → [C, H, W, D] → permute to [C, D, H, W] → resample to volume_size.
+        source_arr = np.stack([volumes[m] for m in self.modalities], axis=0)
+        target_arr = volumes[self.target_modality][None, ...]
+        source = torch.from_numpy(source_arr).float().permute(0, 3, 1, 2)
+        target = torch.from_numpy(target_arr).float().permute(0, 3, 1, 2)
+
+        source = resize_volume_tensor(source, self.volume_size)
+        target = resize_volume_tensor(target, self.volume_size)
+
+        item: dict[str, Any] = {
+            "A": source,
+            "B": target,
+            "sample_id": meta.sample_id,
+            "sample_dir": str(sample_dir),
+            # Native shape (H, W, D) so test-time inference can resample predictions
+            # back to each case's original voxel grid.
+            "native_shape": torch.tensor(meta.shape, dtype=torch.long),
+        }
+
+        if "_mask" in volumes:
+            mask_arr = volumes["_mask"][None, ...]
+            mask = torch.from_numpy(mask_arr).float().permute(0, 3, 1, 2)
+            # Trilinear resample then threshold → nearest-equivalent for a binary mask.
+            mask = (resize_volume_tensor(mask, self.volume_size) > 0.5).float()
             item["M"] = mask
 
         return item

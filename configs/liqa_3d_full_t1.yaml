@@ -1,0 +1,59 @@
+name: liqa_mrgan3d_full_t1
+save_root: outputs/liqa_mrgan3d_full_t1
+mode: 3d_full
+
+# Data — T1-only whole-volume variant. Same resampling rules as
+# configs/liqa_3d_full.yaml.
+input_modalities: [T1]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+input_nc: 1
+output_nc: 1
+volume_size: [32, 384, 384]
+normalize_to_tanh: true
+resample_to_target: true
+percentile_lower: 1.0
+percentile_upper: 99.0
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+g_base_channels: 32
+g_layers: 2
+g_share_layers: 3
+d_base_channels: 32
+d_layers: 3
+regist: true
+shape_loss: true
+unet_chk: chk/UNet3D.pth
+unet_depth: 1
+unet_base_channels: 32
+num_classes: 2
+palette: [[0], [1]]
+
+# Loss weights
+adv_lambda: 1.0
+p2p_lambda: 5.0
+blur_lambda: 5.0
+perceptual_lambda: 0.5
+corr_lambda: 1.0
+smooth_lambda: 1.0
+shape_lambda: 1.0
+
+# Training
+cuda: true
+epoch: 0
+n_epochs: 80
+batch_size: 1
+n_cpu: 2
+lr: 0.0001
+decay_epoch: 20
+log_interval: 10
+checkpoint_interval: 5
+
+amp: true
+activation_checkpoint: true

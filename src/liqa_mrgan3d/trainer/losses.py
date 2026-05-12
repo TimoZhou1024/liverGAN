@@ -139,23 +139,27 @@ class SoftDice3D(nn.Module):
 
 
 def mask_to_onehot_3d(mask: torch.Tensor, palette: list[list[int]]) -> torch.Tensor:
-    """Convert a class-id mask to a one-hot tensor.
+    """Convert a class-id mask to a one-hot tensor, fully on-device.
 
-    ``mask`` has shape ``[B, 1, D, H, W]`` (or ``[1, D, H, W]``) with integer class
-    ids. ``palette`` is a list of single-element class ids, e.g. ``[[0], [1]]``.
-    Returns a float tensor of shape ``[B, len(palette), D, H, W]``.
+    ``mask`` has shape ``[B, 1, D, H, W]`` (or ``[1, D, H, W]``) with integer
+    class ids. ``palette`` is a list of single-element class ids, e.g.
+    ``[[0], [1]]``. Returns a float tensor of shape
+    ``[B, len(palette), D, H, W]`` on the same device as ``mask``.
+
+    The older version copied to CPU via NumPy on every call; that CPU sync
+    serialises with distributed all-reduce collectives and kills FSDP
+    throughput, so the implementation is now a pure-torch broadcast comparison.
     """
-    mask_np = mask.detach().cpu().numpy()
-    if mask_np.ndim == 4:
-        mask_np = mask_np[np.newaxis, ...]
-    if mask_np.ndim != 5 or mask_np.shape[1] != 1:
-        raise ValueError(f"mask must have shape [B, 1, D, H, W], got {mask_np.shape}")
-    semantic = []
-    for colour in palette:
-        equality = np.equal(mask_np, colour[0])
-        semantic.append(equality[:, 0])  # drop the singleton channel dim
-    semantic = np.stack(semantic, axis=1).astype(np.float32)
-    return torch.from_numpy(semantic)
+    if mask.dim() == 4:
+        mask = mask.unsqueeze(0)
+    if mask.dim() != 5 or mask.shape[1] != 1:
+        raise ValueError(f"mask must have shape [B, 1, D, H, W], got {tuple(mask.shape)}")
+    channel = mask[:, 0]  # [B, D, H, W]
+    class_ids = [colour[0] for colour in palette]
+    return torch.stack(
+        [(channel == c).to(torch.float32) for c in class_ids],
+        dim=1,
+    )
 
 
 def psnr_from_mse(mse: float, data_range: float = 2.0) -> float:

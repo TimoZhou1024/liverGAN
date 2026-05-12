@@ -1,0 +1,59 @@
+name: liqa_mrgan3d_t1
+save_root: outputs/liqa_mrgan3d_t1
+mode: 3d_patch
+
+# Data — T1-only variant of configs/liqa_3d_patch.yaml.
+# The multi-discriminator collapses to one discriminator because input_nc=1.
+input_modalities: [T1]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+input_nc: 1
+output_nc: 1
+patch_size: [16, 128, 128]
+patch_stride: [8, 64, 64]
+target_size: null
+normalize_to_tanh: true
+resample_to_target: true
+percentile_lower: 1.0
+percentile_upper: 99.0
+max_patches_per_volume: null
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+g_base_channels: 32
+g_layers: 2
+g_share_layers: 3
+d_base_channels: 32
+d_layers: 3
+regist: true
+shape_loss: true
+unet_chk: chk/UNet3D.pth
+unet_depth: 1
+unet_base_channels: 32
+num_classes: 2
+palette: [[0], [1]]
+
+# Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml)
+adv_lambda: 1.0
+p2p_lambda: 5.0
+blur_lambda: 5.0
+perceptual_lambda: 0.5
+corr_lambda: 1.0
+smooth_lambda: 1.0
+shape_lambda: 1.0
+
+# Training
+cuda: true
+epoch: 0
+n_epochs: 80
+batch_size: 1
+n_cpu: 0
+lr: 0.0001
+decay_epoch: 20
+log_interval: 10
+checkpoint_interval: 5

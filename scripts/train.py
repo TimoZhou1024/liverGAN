@@ -8,12 +8,13 @@ from liqa_mrgan3d.utils.config import load_config
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train LiQA MrGAN 2.5D model.")
+    parser = argparse.ArgumentParser(description="Train LiQA MrGAN 3D / 2.5D model.")
     parser.add_argument("--config", default="configs/liqa_25d.yaml")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    if config.get("mode") == "3d_patch":
+    mode = config.get("mode", "")
+    if mode in ("3d_patch", "3d_full"):
         trainer = LiQA3DTrainer(config)
     else:
         trainer = LiQATrainer(config)
