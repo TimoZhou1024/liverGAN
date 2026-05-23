@@ -294,6 +294,13 @@ class LiQA3DTrainer:
         log_interval = int(self.config.get("log_interval", 10))
         adv_lambda = float(self.config.get("adv_lambda", 1.0))
         p2p_lambda = float(self.config.get("p2p_lambda", 5.0))
+        # Direct L1 supervision on G(A) before Reg warps it. Without this term Reg
+        # acts as a shortcut: it can warp G's mean-image output to match B, so G
+        # never learns input→output alignment. See Phase-1 diagnostic on epoch=74
+        # ckpt: L1(fake_b, B)=0.74 vs L1(reg_b, B)=0.007.
+        direct_lambda = float(self.config.get("direct_lambda", 0.0))
+        mag_lambda = float(self.config.get("mag_lambda", 0.0))
+        reg_warmup_epochs = int(self.config.get("reg_warmup_epochs", 0))
         blur_lambda = float(self.config.get("blur_lambda", 5.0))
         perc_lambda = float(self.config.get("perceptual_lambda", 0.5))
         corr_lambda = float(self.config.get("corr_lambda", 1.0))
@@ -329,8 +336,12 @@ class LiQA3DTrainer:
                     real_a,
                     real_b,
                     mask,
+                    epoch=epoch,
                     adv_lambda=adv_lambda,
                     p2p_lambda=p2p_lambda,
+                    direct_lambda=direct_lambda,
+                    mag_lambda=mag_lambda,
+                    reg_warmup_epochs=reg_warmup_epochs,
                     blur_lambda=blur_lambda,
                     perc_lambda=perc_lambda,
                     corr_lambda=corr_lambda,
@@ -367,8 +378,12 @@ class LiQA3DTrainer:
         real_b: torch.Tensor,
         mask: torch.Tensor | None,
         *,
+        epoch: int,
         adv_lambda: float,
         p2p_lambda: float,
+        direct_lambda: float,
+        mag_lambda: float,
+        reg_warmup_epochs: int,
         blur_lambda: float,
         perc_lambda: float,
         corr_lambda: float,
@@ -385,15 +400,29 @@ class LiQA3DTrainer:
             else _nullcontext()
         )
 
+        # During warmup, freeze Reg as identity so G must learn input→output
+        # alignment by itself. After warmup, Reg is allowed to compensate for
+        # residual misalignment between G(A) and B.
+        reg_active = (
+            self.reg is not None
+            and self.transformer is not None
+            and epoch >= reg_warmup_epochs
+        )
+
         with amp_ctx:
             fake_b = self.net_g(real_a)
 
-            if self.reg is not None and self.transformer is not None:
+            if reg_active:
                 flow = self.reg(fake_b, real_b)
                 reg_b = self.transformer(fake_b, flow)
             else:
                 flow = None
                 reg_b = fake_b
+
+            # Direct L1 on G(A) — the primary fix for the Reg-shortcut failure
+            # mode (G learning a single mean GED4 image while Reg compensates
+            # per-sample). Always computed; lambda may be 0 to disable.
+            loss_l1_direct = self.l1_loss(fake_b, real_b) * direct_lambda
 
             loss_l1 = self.l1_loss(reg_b, real_b) * p2p_lambda
 
@@ -408,9 +437,14 @@ class LiQA3DTrainer:
             if flow is not None:
                 loss_sm = self.l1_loss(reg_b, real_b) * corr_lambda
                 loss_sr = self.smooth_loss(flow) * smooth_lambda
+                # Penalise raw flow magnitude so Reg pays for any displacement,
+                # not just non-smooth ones. Without this, smoothness alone allows
+                # 8-voxel uniform shifts (observed in epoch=74 ckpt).
+                loss_mag = flow.abs().mean() * mag_lambda
             else:
                 loss_sm = torch.zeros((), device=self.device)
                 loss_sr = torch.zeros((), device=self.device)
+                loss_mag = torch.zeros((), device=self.device)
 
             if self.unet is not None and mask is not None:
                 # UNet params are frozen (requires_grad=False), so no grads flow into
@@ -430,7 +464,17 @@ class LiQA3DTrainer:
         else:
             loss_perc = torch.zeros((), device=self.device)
 
-        total_g = loss_l1 + loss_gan + loss_blur + loss_perc + loss_sm + loss_sr + loss_shape
+        total_g = (
+            loss_l1
+            + loss_l1_direct
+            + loss_gan
+            + loss_blur
+            + loss_perc
+            + loss_sm
+            + loss_sr
+            + loss_mag
+            + loss_shape
+        )
 
         if self.scaler_g is not None:
             self.scaler_g.scale(total_g).backward()
@@ -446,11 +490,13 @@ class LiQA3DTrainer:
 
         loss_dict = {
             "loss_l1": float(loss_l1.detach()),
+            "loss_l1_direct": float(loss_l1_direct.detach()),
             "loss_gan": float(loss_gan.detach()),
             "loss_blur": float(loss_blur.detach()),
             "loss_perc": float(loss_perc.detach()),
             "loss_sm": float(loss_sm.detach()),
             "loss_sr": float(loss_sr.detach()),
+            "loss_mag": float(loss_mag.detach()),
             "loss_shape": float(loss_shape.detach()),
         }
         return float(total_g.detach()), loss_dict, fake_b.detach()

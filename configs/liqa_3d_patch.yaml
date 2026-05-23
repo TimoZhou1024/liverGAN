@@ -45,7 +45,18 @@ palette: [[0], [1]]
 
 # Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml)
 adv_lambda: 1.0
-p2p_lambda: 5.0
+# Direct L1 on G(A) before Reg warps it. The Phase-1 diagnostic on the previous
+# epoch=74 ckpt found L1(fake_b, B)=0.74 vs L1(reg_b, B)=0.007: Reg was acting as
+# a shortcut so G learned a single mean-image. direct_lambda forces G itself to
+# match the target, p2p_lambda is reduced from 5.0 → 2.0 so Reg cannot dominate.
+direct_lambda: 5.0
+p2p_lambda: 2.0
+# Penalise Reg's raw flow magnitude. Smoothness alone allows uniform 8-voxel
+# shifts (observed in epoch=74 ckpt); this term makes Reg pay for any motion.
+mag_lambda: 2.0
+# Freeze Reg as identity for the first N epochs so G learns input→output
+# alignment by itself before Reg can compensate.
+reg_warmup_epochs: 10
 blur_lambda: 5.0
 perceptual_lambda: 0.5
 corr_lambda: 1.0
