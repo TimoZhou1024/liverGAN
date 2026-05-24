@@ -1,0 +1,102 @@
+name: liqa_mrgan3d_full_singlecard
+save_root: outputs/liqa_mrgan3d_full_singlecard
+mode: 3d_full
+
+# ============================================================================
+# Single-card config tuned for an RTX 6000 Pro (96 GB).
+#
+# Differences vs. configs/liqa_3d_full.yaml:
+#   - volume_size [32, 384, 384] → [64, 384, 384]  (D doubled, closer to LiQA
+#     native slice count of ~50; still divisible by 32 as required by the 5
+#     stride-2 halvings in MrGANGenerator3D)
+#   - batch_size 1 → 2  (96 GB fits two volumes per step; smoother BN/Adam stats)
+#   - amp true → false  (fp32 is numerically stabler; not memory-bound on 96 GB)
+#   - activation_checkpoint true → false  (skip the 30-40% recompute cost since
+#     we have headroom)
+#
+# The Reg-shortcut fix from the patch config (direct_lambda / mag_lambda /
+# reg_warmup_epochs) is included here — without it the generator collapses to
+# a mean-image and Reg compensates per-sample, which we observed on the
+# previous epoch=74 patch checkpoint.
+#
+# Launch:  uv run python scripts/train.py --config configs/liqa_3d_full_singlecard.yaml
+# Do NOT use torchrun — FSDP is pure overhead on a single GPU and is auto-
+# disabled when world_size==1, but bypassing the wrapper entirely is cleaner.
+# ============================================================================
+
+# Data — whole-volume training. All three dimensions of volume_size MUST be
+# divisible by 32 (MrGANGenerator3D halves each spatial dim 5 times).
+input_modalities: [T1, T2, DWI_800]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+input_nc: 3
+output_nc: 1
+volume_size: [64, 384, 384]
+normalize_to_tanh: true
+resample_to_target: true
+percentile_lower: 1.0
+percentile_upper: 99.0
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+g_base_channels: 32
+g_layers: 2
+g_share_layers: 3
+d_base_channels: 32
+d_layers: 3
+regist: true
+shape_loss: true
+unet_chk: chk/UNet3D.pth
+unet_depth: 1
+unet_base_channels: 32
+num_classes: 2
+palette: [[0], [1]]
+
+# Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml + Reg-shortcut fix)
+adv_lambda: 1.0
+# Direct L1 on G(A) before Reg warps it. The Phase-1 diagnostic on the previous
+# epoch=74 ckpt found L1(fake_b, B)=0.74 vs L1(reg_b, B)=0.007: Reg was acting
+# as a shortcut so G learned a single mean-image. direct_lambda forces G itself
+# to match the target; p2p_lambda is reduced from 5.0 → 2.0 so Reg cannot
+# dominate the gradient signal.
+direct_lambda: 5.0
+p2p_lambda: 2.0
+# Penalise Reg's raw flow magnitude. Smoothness alone allowed uniform 8-voxel
+# shifts (observed in epoch=74 ckpt); this term makes Reg pay for any motion.
+mag_lambda: 2.0
+# Freeze Reg as identity for the first N epochs so G learns input→output
+# alignment by itself before Reg can start compensating.
+reg_warmup_epochs: 10
+blur_lambda: 5.0
+perceptual_lambda: 0.5
+corr_lambda: 1.0
+smooth_lambda: 1.0
+shape_lambda: 1.0
+
+# LPIPS subsamples k slices per call. With D=64 and full LPIPS we'd run
+# batch=64 through VGG16 — 30+ GB of VGG activations alone. k=16 caps that to
+# ~8 GB and keeps the Monte-Carlo variance acceptable; raise to 32 if you find
+# loss_perc too noisy in TensorBoard.
+lpips_slices: 16
+
+# Training
+cuda: true
+epoch: 0
+n_epochs: 80
+batch_size: 2
+n_cpu: 4
+lr: 0.0001
+decay_epoch: 20
+log_interval: 10
+checkpoint_interval: 5
+
+# Single-GPU: skip both AMP and activation checkpointing — 96 GB has plenty of
+# headroom and avoiding the recompute / autocast overhead nets ~30-40% faster
+# steps. If you ever switch to a smaller card, set both to true.
+amp: false
+activation_checkpoint: false
