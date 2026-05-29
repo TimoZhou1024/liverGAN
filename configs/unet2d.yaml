@@ -1,0 +1,30 @@
+name: liqa_unet2d
+save_root: outputs/unet2d
+chk_path: chk/UNet2D.pth
+
+# Data — 2D slice mode, only liver-bearing slices.
+input_modalities: [T1, T2, DWI_800]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+slice_size: 256
+normalize_to_tanh: true
+resample_to_target: true
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+num_classes: 2
+palette: [[0], [1]]
+unet_depth: 1
+unet_base_channels: 32
+
+# Training
+cuda: true
+n_epochs: 30
+batch_size: 16
+n_cpu: 4
+lr: 0.0001

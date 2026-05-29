@@ -597,3 +597,145 @@ class LiQA3DFullVolumeDataset(Dataset[dict[str, Any]]):
             item["M"] = mask
 
         return item
+
+
+class LiQA2DSliceDataset(Dataset[dict[str, Any]]):
+    """Pure 2D slice dataset, filtered to slices that contain liver tissue.
+
+    For each case in the split file, the GED4 mask under ``mask_root`` is loaded
+    and any axial slice with at least one positive mask voxel is admitted to
+    the index. Modalities are loaded lazily and cached per case (same pattern
+    as :class:`LiQA3DPatchDataset`), then the requested slice is extracted as
+    a 2D tensor of shape ``[C, H, W]`` (source) / ``[1, H, W]`` (target/mask).
+
+    Use this for ``mode: 2d_slice`` training. ``slice_size`` (default 256)
+    controls bilinear resize of every slice before being returned, so that
+    different vendors with different in-plane resolutions yield uniformly
+    shaped tensors. Must be divisible by 32 to match
+    :class:`MrGANGenerator2D`'s 5 stride-2 halvings.
+    """
+
+    def __init__(self, config: dict[str, Any], split: str = "train") -> None:
+        self.config = config
+        self.split = split
+        self.modalities: list[str] = list(
+            config.get("input_modalities", ["T1", "T2", "DWI_800"])
+        )
+        self.target_modality: str = str(config.get("target_modality", "GED4"))
+        self.slice_size = int(config.get("slice_size", 256))
+        if self.slice_size % 32 != 0:
+            raise ValueError(
+                f"slice_size={self.slice_size} must be divisible by 32 (generator halves "
+                "spatial dims 5 times)"
+            )
+        self.mask_root: Path | None = (
+            Path(config["mask_root"]) if config.get("mask_root") else None
+        )
+        self.dataset_root: Path | None = (
+            Path(config["dataset_root"]) if config.get("dataset_root") else None
+        )
+        self.mask_suffix: str = str(config.get("mask_suffix", "GED4_pred.nii.gz"))
+        if self.mask_root is None:
+            raise ValueError(
+                "LiQA2DSliceDataset requires mask_root in config (slice filtering relies on it)."
+            )
+
+        list_key = f"{split}_txt_path"
+        if list_key not in config:
+            raise KeyError(f"Missing config key: {list_key}")
+        self.sample_dirs = _read_list(config[list_key])
+        if not self.sample_dirs:
+            raise ValueError(f"No samples found in {config[list_key]}")
+
+        self._cache: dict[Path, tuple[dict[str, np.ndarray], VolumeMeta]] = {}
+        # index entries: (sample_dir, z) — only z's where mask has positive voxels.
+        self.index: list[tuple[Path, int]] = []
+        self._build_index()
+
+    def _build_index(self) -> None:
+        """Index only liver-bearing slices.
+
+        Reads the mask NIfTI for each case (small, single channel) without
+        touching the heavy modality volumes; per-slice ``sum > 0`` decides
+        whether the slice gets indexed. Mask is then forgotten — modalities and
+        a fresh mask are loaded together via ``load_case_volumes`` only when
+        ``__getitem__`` actually needs them.
+        """
+        assert self.mask_root is not None
+        kept_total = 0
+        skipped_total = 0
+        for sample_dir in self.sample_dirs:
+            mask_path = _resolve_mask_path(
+                sample_dir,
+                mask_root=self.mask_root,
+                dataset_root=self.dataset_root,
+                mask_suffix=self.mask_suffix,
+            )
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Missing mask file: {mask_path}")
+            mask_volume, _, _ = load_nifti(mask_path)
+            # NIfTI shape is (H, W, D); per-slice axis is the last one.
+            depth = mask_volume.shape[2]
+            for z in range(depth):
+                if (mask_volume[:, :, z] > 0).any():
+                    self.index.append((Path(sample_dir), z))
+                    kept_total += 1
+                else:
+                    skipped_total += 1
+        if not self.index:
+            raise ValueError("LiQA2DSliceDataset index is empty — no slices pass the mask filter.")
+        print(
+            f"[LiQA2DSliceDataset/{self.split}] indexed {kept_total} slices "
+            f"(skipped {skipped_total} non-liver slices) across {len(self.sample_dirs)} cases."
+        )
+
+    def _load_sample(self, sample_dir: Path) -> tuple[dict[str, np.ndarray], VolumeMeta]:
+        sample_dir = Path(sample_dir)
+        if sample_dir in self._cache:
+            return self._cache[sample_dir]
+        volumes, meta = load_case_volumes(
+            self.config,
+            sample_dir,
+            modalities=self.modalities,
+            target_modality=self.target_modality,
+        )
+        self._cache[sample_dir] = (volumes, meta)
+        return volumes, meta
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample_dir, z = self.index[idx]
+        volumes, meta = self._load_sample(sample_dir)
+
+        # Modality / target / mask volumes are stored as (H, W, D); axial slice z.
+        source_slices = [volumes[m][:, :, z] for m in self.modalities]
+        target_slice = volumes[self.target_modality][:, :, z]
+
+        source = torch.from_numpy(np.stack(source_slices, axis=0)).float()  # [C, H, W]
+        target = torch.from_numpy(target_slice[None, ...]).float()  # [1, H, W]
+
+        # Resize to uniform (slice_size, slice_size).
+        target_size = (self.slice_size, self.slice_size)
+        source = resize_slice_tensor(source, target_size)
+        target = resize_slice_tensor(target, target_size)
+
+        item: dict[str, Any] = {
+            "A": source,
+            "B": target,
+            "sample_id": meta.sample_id,
+            "slice_index": int(z),
+            "sample_dir": str(sample_dir),
+            # Native (H, W) for inference — slice gets resampled back to it.
+            "native_hw": torch.tensor([meta.shape[0], meta.shape[1]], dtype=torch.long),
+        }
+
+        if "_mask" in volumes:
+            mask_slice = volumes["_mask"][:, :, z]
+            mask = torch.from_numpy(mask_slice[None, ...]).float()  # [1, H, W]
+            mask = (resize_slice_tensor(mask, target_size) > 0.5).float()
+            item["M"] = mask
+
+        return item
+

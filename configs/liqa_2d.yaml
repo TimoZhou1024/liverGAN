@@ -1,0 +1,68 @@
+name: liqa_mrgan2d
+save_root: outputs/liqa_mrgan2d
+mode: 2d_slice
+
+# ============================================================================
+# 2D slice training. The dataset filters out slices where the liver mask is
+# empty, so every batch sample contains liver tissue. Algorithmically identical
+# to the 3D MrGAN config (same losses, same Reg-shortcut fixes), just with
+# 2D ops throughout. Recommended for fast iteration / sanity-checking the
+# multi-discriminator + Reg pipeline.
+# ============================================================================
+
+# Data
+input_modalities: [T1, T2, DWI_800]
+target_modality: GED4
+dataset_root: D:\BaiduNetdiskDownload
+mask_root: D:\BaiduNetdiskDownload\GED4_masks_pred
+mask_suffix: GED4_pred.nii.gz
+input_nc: 3
+output_nc: 1
+slice_size: 256                 # must be divisible by 32 (5 stride-2 halvings)
+normalize_to_tanh: true
+resample_to_target: true
+percentile_lower: 1.0
+percentile_upper: 99.0
+
+train_txt_path: data/train.txt
+val_txt_path: data/val.txt
+test_txt_path: data/test.txt
+
+# Model
+g_base_channels: 64             # MrGAN 2D paper default
+g_layers: 2
+g_share_layers: 3
+d_base_channels: 64
+d_layers: 3
+regist: true
+shape_loss: true
+unet_chk: chk/UNet2D.pth
+unet_depth: 1
+unet_base_channels: 32
+num_classes: 2
+palette: [[0], [1]]
+
+# Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml + Reg-shortcut fix)
+adv_lambda: 1.0
+direct_lambda: 5.0              # G must match B without Reg's help
+p2p_lambda: 2.0                 # was 5.0 — reduced so Reg cannot dominate
+mag_lambda: 2.0                 # penalise raw flow magnitude
+reg_warmup_epochs: 10           # Reg disabled for first N epochs
+blur_lambda: 5.0
+perceptual_lambda: 0.5
+corr_lambda: 1.0
+smooth_lambda: 1.0
+shape_lambda: 1.0
+
+# Training
+cuda: true
+epoch: 0
+n_epochs: 80
+batch_size: 16                  # 2D slices are small — bump batch up
+n_cpu: 4
+lr: 0.0001
+decay_epoch: 20
+log_interval: 50
+checkpoint_interval: 5
+
+amp: false                      # batch=16 256x256 fits comfortably; fp32 stable

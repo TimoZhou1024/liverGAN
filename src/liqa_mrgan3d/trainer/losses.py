@@ -74,6 +74,20 @@ class SmoothnessLoss3D(nn.Module):
         return (dz * dz).mean() + (dy * dy).mean() + (dx * dx).mean()
 
 
+class SmoothnessLoss2D(nn.Module):
+    """Squared first-order finite-difference penalty on a 2D displacement field.
+
+    Direct port of ``smooothing_loss`` from reference/MrGAN/trainer/utils.py:167.
+    Operates on flow tensors of shape (B, C, H, W) where C=2 for the per-axis
+    displacement.
+    """
+
+    def forward(self, flow: torch.Tensor) -> torch.Tensor:
+        dy = flow[:, :, 1:, :] - flow[:, :, :-1, :]
+        dx = flow[:, :, :, 1:] - flow[:, :, :, :-1]
+        return (dy * dy).mean() + (dx * dx).mean()
+
+
 class LPIPS2DSliceWise(nn.Module):
     """LPIPS computed slice-wise along the depth axis of a 3D volume.
 
@@ -170,6 +184,24 @@ def mask_to_onehot_3d(mask: torch.Tensor, palette: list[list[int]]) -> torch.Ten
     if mask.dim() != 5 or mask.shape[1] != 1:
         raise ValueError(f"mask must have shape [B, 1, D, H, W], got {tuple(mask.shape)}")
     channel = mask[:, 0]  # [B, D, H, W]
+    class_ids = [colour[0] for colour in palette]
+    return torch.stack(
+        [(channel == c).to(torch.float32) for c in class_ids],
+        dim=1,
+    )
+
+
+def mask_to_onehot_2d(mask: torch.Tensor, palette: list[list[int]]) -> torch.Tensor:
+    """2D analogue of :func:`mask_to_onehot_3d`.
+
+    ``mask`` has shape ``[B, 1, H, W]`` (or ``[1, H, W]``) with integer class
+    ids. Returns ``[B, len(palette), H, W]`` on the same device.
+    """
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(0)
+    if mask.dim() != 4 or mask.shape[1] != 1:
+        raise ValueError(f"mask must have shape [B, 1, H, W], got {tuple(mask.shape)}")
+    channel = mask[:, 0]  # [B, H, W]
     class_ids = [colour[0] for colour in palette]
     return torch.stack(
         [(channel == c).to(torch.float32) for c in class_ids],
