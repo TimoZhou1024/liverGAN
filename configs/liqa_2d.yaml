@@ -42,7 +42,8 @@ unet_base_channels: 32
 num_classes: 2
 palette: [[0], [1]]
 
-# Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml + Reg-shortcut fix)
+# Loss weights (mirror reference/MrGAN/Yaml/mrgan.yaml + Reg-shortcut fix
+# + liver-weighted L1)
 adv_lambda: 1.0
 direct_lambda: 5.0              # G must match B without Reg's help
 p2p_lambda: 2.0                 # was 5.0 — reduced so Reg cannot dominate
@@ -53,6 +54,10 @@ perceptual_lambda: 0.5
 corr_lambda: 1.0
 smooth_lambda: 1.0
 shape_lambda: 1.0
+# Liver mask weighting for L1 losses (liver < 5% of slice area → without
+# this the model learns background perfectly but ignores the liver).
+liver_weight: 20.0
+bg_weight: 1.0
 
 # Training
 cuda: true

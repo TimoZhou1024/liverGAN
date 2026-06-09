@@ -70,6 +70,8 @@ class LiQA2DTrainer:
         self.palette = config.get("palette", [[0], [1]])
         self.num_classes = int(config.get("num_classes", 2))
         self.use_amp = bool(config.get("amp", False))
+        self.liver_weight = float(config.get("liver_weight", 20.0))
+        self.bg_weight = float(config.get("bg_weight", 1.0))
 
         # --- Generator + N PatchGAN discriminators (one per input modality) ---
         self.net_g = MrGANGenerator2D(
@@ -256,6 +258,26 @@ class LiQA2DTrainer:
         self.writer.close()
 
     # ---------------------------------------------------------------- G step
+    @staticmethod
+    def _weighted_l1(pred: torch.Tensor, target: torch.Tensor,
+                     mask: torch.Tensor | None = None,
+                     liver_weight: float = 20.0, bg_weight: float = 1.0,
+                     eps: float = 1e-6) -> torch.Tensor:
+        """Mask-weighted L1 that gives liver voxels ``liver_weight``× the gradient pull.
+
+        Without this, liver voxels (typically < 5% of pixels on a 2D slice) are
+        drowned out by 95% background — the model learns to nail the easy
+        background and ignores the hard liver detail.
+        """
+        if mask is None or mask.sum() < 1:
+            return (pred - target).abs().mean()
+        mask_f = mask.to(pred.dtype)
+        total_liver = mask_f.sum() + eps
+        total_bg = (1 - mask_f).sum() + eps
+        loss_liver = ((pred - target).abs() * mask_f).sum() / total_liver * liver_weight
+        loss_bg = ((pred - target).abs() * (1 - mask_f)).sum() / total_bg * bg_weight
+        return loss_liver + loss_bg
+
     def _g_step(
         self,
         real_a: torch.Tensor,
@@ -300,8 +322,8 @@ class LiQA2DTrainer:
                 flow = None
                 reg_b = fake_b
 
-            loss_l1_direct = self.l1_loss(fake_b, real_b) * direct_lambda
-            loss_l1 = self.l1_loss(reg_b, real_b) * p2p_lambda
+            loss_l1_direct = self._weighted_l1(fake_b, real_b, mask, self.liver_weight, self.bg_weight) * direct_lambda
+            loss_l1 = self._weighted_l1(reg_b, real_b, mask, self.liver_weight, self.bg_weight) * p2p_lambda
 
             loss_gan = torch.zeros((), device=self.device)
             for i in range(self.input_nc):
@@ -309,7 +331,7 @@ class LiQA2DTrainer:
                 pred_fake = self.net_d[i](fake_pair)
                 loss_gan = loss_gan + self.gan_loss(pred_fake, True) * adv_lambda
 
-            loss_blur = self.l1_loss(self.blur(reg_b), self.blur(real_b)) * blur_lambda
+            loss_blur = self._weighted_l1(self.blur(reg_b), self.blur(real_b), mask, self.liver_weight, self.bg_weight) * blur_lambda
 
             if flow is not None:
                 loss_sm = self.l1_loss(reg_b, real_b) * corr_lambda

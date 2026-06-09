@@ -77,18 +77,20 @@ perceptual_lambda: 0.5
 corr_lambda: 1.0
 smooth_lambda: 1.0
 shape_lambda: 1.0
+liver_weight: 20.0
+bg_weight: 1.0
 
 # LPIPS subsamples k slices per call. With D=64 and full LPIPS we'd run
 # batch=64 through VGG16 — 30+ GB of VGG activations alone. k=16 caps that to
 # ~8 GB and keeps the Monte-Carlo variance acceptable; raise to 32 if you find
 # loss_perc too noisy in TensorBoard.
-lpips_slices: 16
+lpips_slices: 8
 
 # Training
 cuda: true
 epoch: 0
 n_epochs: 80
-batch_size: 2
+batch_size: 1
 n_cpu: 4
 lr: 0.0001
 decay_epoch: 20
@@ -99,4 +101,4 @@ checkpoint_interval: 5
 # headroom and avoiding the recompute / autocast overhead nets ~30-40% faster
 # steps. If you ever switch to a smaller card, set both to true.
 amp: false
-activation_checkpoint: false
+activation_checkpoint: true

@@ -43,6 +43,8 @@ perceptual_lambda: 0.5
 corr_lambda: 1.0
 smooth_lambda: 1.0
 shape_lambda: 1.0
+liver_weight: 20.0
+bg_weight: 1.0
 
 # Subsample LPIPS slices; see comment in configs/liqa_3d_full.yaml.
 lpips_slices: 4
